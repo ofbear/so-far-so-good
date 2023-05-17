@@ -1,36 +1,46 @@
 use axum::{
     error_handling::HandleErrorLayer,
-    extract::ws::WebSocketUpgrade,
-    extract::State,
     http::StatusCode,
-    response::Response,
     routing::{get, post},
     BoxError, Router,
 };
-use axum_macros::debug_handler;
 use tower::{timeout::TimeoutLayer, ServiceBuilder};
 use tracing::*;
 
 use crate::common;
 use crate::config::SharedConfig;
-use crate::function::{hook_up, AppState};
+use crate::healthcheck::{status, SharedHealthcheck};
+use crate::http;
+use crate::ws;
 
-pub async fn start(config: SharedConfig) {
-    let app_state = AppState { config };
+#[derive(Debug, Clone)]
+pub struct AppState {
+    pub config: SharedConfig,
+    pub healthcheck: SharedHealthcheck,
+}
+
+pub async fn start(config: SharedConfig, healthcheck: SharedHealthcheck) {
+    let app_state = AppState {
+        config,
+        healthcheck,
+    };
 
     let app = Router::new()
         .route(
             // 認証
-            "/",
-            post(ws_post).get(ws_get).with_state(app_state.clone()),
+            "/http",
+            post(http::post)
+                .get(http::get)
+                .with_state(app_state.clone()),
         )
         .route(
-            // バージョン
-            "/version",
-            get(common::version),
+            "/ws",
+            post(ws::post).get(ws::get).with_state(app_state.clone()),
         )
+        .route("/version", get(common::version))
+        .route("/healthcheck", get(status).with_state(app_state.clone()))
         .layer(
-            ServiceBuilder::new() // タイムアウト設定
+            ServiceBuilder::new()
                 .layer(HandleErrorLayer::new(|_: BoxError| async {
                     StatusCode::SERVICE_UNAVAILABLE
                 }))
@@ -42,14 +52,4 @@ pub async fn start(config: SharedConfig) {
         .serve(app.into_make_service())
         .await
         .unwrap_or_else(|e| panic!("The dream is gone.:{}", e));
-}
-
-#[debug_handler]
-pub async fn ws_post(ws: WebSocketUpgrade, app_state: State<AppState>) -> Response {
-    ws.on_upgrade(|socket| hook_up(socket, app_state))
-}
-
-#[debug_handler]
-pub async fn ws_get(ws: WebSocketUpgrade, app_state: State<AppState>) -> Response {
-    ws.on_upgrade(|socket| hook_up(socket, app_state))
 }
